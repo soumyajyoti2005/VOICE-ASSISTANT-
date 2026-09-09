@@ -3,7 +3,9 @@ import time
 from typing import Optional, Callable, Dict, Any, List
 from dataclasses import dataclass
 from enum import Enum
+import numpy as np
 
+from backend.config import config
 from backend.agent.state import state_manager, ConversationState
 from backend.agent.cancellation import fence_result, create_tagged_result
 from backend.services.stt import stt_client, STTResult
@@ -39,10 +41,12 @@ class TurnManager:
         on_status_change: Optional[Callable[[TurnStatus], None]] = None,
         on_transcript: Optional[Callable[[str, bool], None]] = None,
         on_metrics: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_audio_chunk: Optional[Callable[[bytes], Any]] = None,
     ):
         self.on_status_change = on_status_change
         self.on_transcript = on_transcript
         self.on_metrics = on_metrics
+        self.on_audio_chunk = on_audio_chunk
 
         self.audio = FullDuplexAudio(on_input_chunk=self._handle_audio_input)
         self._stt_connected = False
@@ -52,20 +56,49 @@ class TurnManager:
         self._pending_tool_task: Optional[asyncio.Task] = None
         self._current_turn_metrics: Optional[TurnMetrics] = None
         self._running = False
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+        self._speech_buffer = bytearray()
+        self._speech_detected = False
+        self._silence_frames = 0
 
     def _set_status(self, status: TurnStatus):
         if self.on_status_change:
             self.on_status_change(status)
 
+    def _send_transcript(self, text: str, is_final: bool, is_user: bool = False):
+        if not self.on_transcript:
+            return
+        try:
+            self.on_transcript(text, is_final, is_user)
+        except TypeError:
+            self.on_transcript(text, is_final)
+
     async def start(self):
+        self._loop = asyncio.get_running_loop()
         self._running = True
         await llm_manager.initialize()
         await rime_tts_manager.initialize()
         await stt_client.connect(self._handle_stt_result)
         self._stt_connected = True
-        rime_tts_manager.set_playback_callback(self.audio.write_playback)
+
+        def _handle_playback(audio_bytes: bytes):
+            self.audio.write_playback(audio_bytes)
+            if self.on_audio_chunk:
+                self.on_audio_chunk(audio_bytes)
+
+        rime_tts_manager.set_playback_callback(_handle_playback)
         self.audio.start()
         self._set_status(TurnStatus.LISTENING)
+
+    def process_text_input(self, text: str):
+        state_manager.new_turn()
+        response_id = state_manager.get_current_response_id()
+        state_manager.state.current_turn_t0 = time.perf_counter()
+        state_manager.state.mark_t1()
+        if self.on_transcript:
+            self._send_transcript(text, True, True)
+        self._process_user_turn(text, response_id)
 
     async def stop(self):
         self._running = False
@@ -75,8 +108,90 @@ class TurnManager:
         await llm_manager.close()
 
     def _handle_audio_input(self, chunk: AudioChunk):
-        if self._stt_connected:
-            asyncio.create_task(stt_client.send_audio(chunk.data))
+        if not self._stt_connected or not self._running:
+            return
+
+        if len(chunk.data) < 2:
+            return
+
+        # Calculate RMS energy of 16-bit PCM chunk
+        samples = np.frombuffer(chunk.data, dtype=np.int16)
+        if len(samples) == 0:
+            return
+
+        energy = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2))) / 32768.0
+        is_voice = energy > config.vad_threshold
+
+        if is_voice:
+            # Immediate barge-in on new speech if audio is playing or tool is executing
+            if state_manager.state.audio_playing or state_manager.state.tool_running:
+                self.interrupt()
+
+            if not self._speech_detected:
+                self._speech_detected = True
+                self._speech_buffer = bytearray()
+                self._silence_frames = 0
+
+            self._speech_buffer.extend(chunk.data)
+            self._silence_frames = 0
+
+        elif self._speech_detected:
+            self._speech_buffer.extend(chunk.data)
+            self._silence_frames += 1
+
+            chunk_duration = len(chunk.data) / (chunk.sample_rate * 2)
+            silence_duration = self._silence_frames * chunk_duration
+
+            if silence_duration >= config.vad_silence_duration:
+                # Speech turn ended (T0)
+                self._speech_detected = False
+                self._silence_frames = 0
+                pcm_data = bytes(self._speech_buffer)
+                self._speech_buffer = bytearray()
+
+                # Filter out clicks/noise (<0.5s)
+                if len(pcm_data) >= int(chunk.sample_rate * 2 * 0.5):
+                    if self._loop and self._loop.is_running():
+                        asyncio.run_coroutine_threadsafe(
+                            self._process_audio_turn(pcm_data, chunk.sample_rate),
+                            self._loop,
+                        )
+
+    async def _process_audio_turn(self, pcm_data: bytes, sample_rate: int):
+        samples = np.frombuffer(pcm_data, dtype=np.int16)
+        if len(samples) == 0:
+            return
+
+        mean_energy = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2))) / 32768.0
+        if mean_energy < 0.04:
+            return
+
+        state_manager.new_turn()
+        response_id = state_manager.get_current_response_id()
+        # Mark T0: User speech ended
+        state_manager.state.current_turn_t0 = time.perf_counter()
+        self._set_status(TurnStatus.PROCESSING)
+
+        # Transcribe with Groq whisper-large-v3-turbo
+        text = await stt_client.transcribe_audio(pcm_data, response_id, sample_rate=sample_rate)
+
+        if not text or state_manager.is_stale(response_id):
+            if not state_manager.is_stale(response_id):
+                self._set_status(TurnStatus.LISTENING)
+            return
+
+        clean_text = text.strip().lower().rstrip(".!?,")
+        if clean_text in ("thank you", "thanks", "thanks for watching", "mm-hmm", "yeah", "you", "bye") and len(pcm_data) < sample_rate * 2 * 1.2:
+            if not state_manager.is_stale(response_id):
+                self._set_status(TurnStatus.LISTENING)
+            return
+
+        # Mark T1: STT transcript ready
+        state_manager.state.mark_t1()
+        if self.on_transcript:
+            self._send_transcript(text, True, True)
+
+        self._process_user_turn(text, response_id)
 
     def _handle_stt_result(self, result: STTResult):
         if state_manager.is_stale(result.response_id):
@@ -86,7 +201,7 @@ class TurnManager:
         self._transcript_final = result.is_final
 
         if self.on_transcript:
-            self.on_transcript(result.text, result.is_final)
+            self._send_transcript(result.text, result.is_final, True)
 
         if result.is_final and result.text.strip():
             state_manager.state.mark_t1()
@@ -101,6 +216,7 @@ class TurnManager:
         )
 
     async def _run_llm_pipeline(self, text: str, response_id: int):
+        print(f"[TurnManager] Processing turn: {text!r} (response_id={response_id})")
         self._set_status(TurnStatus.PROCESSING)
         state_manager.state.mark_t2()
 
@@ -125,12 +241,14 @@ class TurnManager:
                 if chunk.is_final and not chunk.tool_calls:
                     if sentence_buffer.strip():
                         state_manager.state.mark_t3()
-                        asyncio.create_task(self._stream_to_rime(sentence_buffer.strip(), response_id))
+                        await self._stream_to_rime(sentence_buffer.strip(), response_id)
 
         except asyncio.CancelledError:
             pass
         except Exception as e:
             print(f"LLM pipeline error: {e}")
+            if not state_manager.is_stale(response_id):
+                self._set_status(TurnStatus.LISTENING)
 
     def _handle_llm_chunk(self, chunk: LLMChunk):
         pass
@@ -170,6 +288,13 @@ class TurnManager:
                 self._set_status(TurnStatus.LISTENING)
 
     async def _stream_to_rime(self, text: str, response_id: int):
+        if state_manager.is_stale(response_id):
+            return
+
+        print(f"[TurnManager] Streaming {len(text)} chars to Rime TTS: {text!r} (response_id={response_id})")
+        if self.on_transcript:
+            self._send_transcript(text, True, False)
+
         self._set_status(TurnStatus.SPEAKING)
         state_manager.set_audio_playing(True)
 
@@ -182,11 +307,14 @@ class TurnManager:
 
                 if not state_manager.state.current_turn_t5:
                     state_manager.state.mark_t5()
+                    log_turn_metrics(state_manager.state.to_dict())
                     if self.on_metrics:
                         self.on_metrics(state_manager.state.to_dict())
 
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            print(f"[TurnManager] Rime TTS playback error: {e}")
         finally:
             state_manager.set_audio_playing(False)
             if not state_manager.is_stale(response_id):
@@ -195,6 +323,9 @@ class TurnManager:
     def interrupt(self) -> int:
         new_response_id = state_manager.interrupt()
         self.audio.stop_playback_immediately()
+        self._speech_detected = False
+        self._speech_buffer = bytearray()
+        self._silence_frames = 0
 
         if self._pending_llm_task:
             self._pending_llm_task.cancel()

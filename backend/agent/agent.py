@@ -21,33 +21,59 @@ class VoiceAgent:
         on_state_change: Optional[Callable[[AgentState], None]] = None,
         on_transcript: Optional[Callable[[str, bool], None]] = None,
         on_metrics: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_audio_chunk: Optional[Callable[[bytes], None]] = None,
     ):
         self.on_state_change = on_state_change
         self.on_transcript = on_transcript
         self.on_metrics = on_metrics
+        self.on_audio_chunk = on_audio_chunk
 
         self._turn_manager = TurnManager(
             on_status_change=self._handle_status_change,
             on_transcript=self._handle_transcript,
             on_metrics=self._handle_metrics,
+            on_audio_chunk=self._handle_audio_chunk,
         )
         self._current_state = AgentState()
 
+    def _handle_audio_chunk(self, chunk: bytes):
+        if self.on_audio_chunk:
+            self.on_audio_chunk(chunk)
+
+    def _dispatch_callback(self, cb, *args):
+        if not cb:
+            return
+        res = cb(*args)
+        if asyncio.iscoroutine(res):
+            loop = None
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                if getattr(self, "_turn_manager", None) and self._turn_manager._loop and self._turn_manager._loop.is_running():
+                    loop = self._turn_manager._loop
+
+            if loop and loop.is_running():
+                try:
+                    current_loop = asyncio.get_running_loop()
+                    if current_loop is loop:
+                        loop.create_task(res)
+                    else:
+                        asyncio.run_coroutine_threadsafe(res, loop)
+                except RuntimeError:
+                    asyncio.run_coroutine_threadsafe(res, loop)
+
     def _handle_status_change(self, status: TurnStatus):
         self._current_state.status = status
-        if self.on_state_change:
-            self.on_state_change(self._current_state)
+        self._dispatch_callback(self.on_state_change, self._current_state)
 
-    def _handle_transcript(self, text: str, is_final: bool):
+    def _handle_transcript(self, text: str, is_final: bool, is_user: bool = False):
         self._current_state.transcript = text
         self._current_state.transcript_final = is_final
-        if self.on_transcript:
-            self.on_transcript(text, is_final)
+        self._dispatch_callback(self.on_transcript, text, is_final, is_user)
 
     def _handle_metrics(self, metrics: Dict[str, Any]):
         self._current_state.metrics = metrics
-        if self.on_metrics:
-            self.on_metrics(metrics)
+        self._dispatch_callback(self.on_metrics, metrics)
 
     async def start(self):
         await self._turn_manager.start()
@@ -58,6 +84,9 @@ class VoiceAgent:
 
     def interrupt(self) -> int:
         return self._turn_manager.interrupt()
+
+    def process_text_input(self, text: str):
+        self._turn_manager.process_text_input(text)
 
     def get_state(self) -> Dict[str, Any]:
         return self._turn_manager.get_state()

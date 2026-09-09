@@ -1,6 +1,7 @@
 import asyncio
 import aiohttp
 import json
+import uuid
 from typing import AsyncGenerator, Optional, List, Dict, Any, Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -41,7 +42,7 @@ class LLMChunk:
 class StreamingLLMClient:
     def __init__(self):
         self._session: Optional[aiohttp.ClientSession] = None
-        self._base_url = config.llm_base_url
+        self._base_url = config.llm_base_url.rstrip("/")
         self._api_key = config.llm_api_key
         self._model = config.llm_model
         self._temperature = config.llm_temperature
@@ -104,104 +105,173 @@ class StreamingLLMClient:
         if not self._session:
             raise RuntimeError("LLMClient not initialized")
 
-        payload = {
-            "model": self._model,
-            "messages": messages,
-            "temperature": self._temperature,
-            "stream": True,
-            "tools": self._tools,
-            "tool_choice": "auto",
-        }
+        models_to_try = [self._model]
+        for fb in ["gemini-3.1-flash-lite", "gemini-flash-lite-latest", "gemini-3.5-flash"]:
+            if fb not in models_to_try:
+                models_to_try.append(fb)
+
+        resp = None
+        for model_name in models_to_try:
+            payload = {
+                "model": model_name,
+                "messages": messages,
+                "temperature": self._temperature,
+                "stream": True,
+                "tools": self._tools,
+                "tool_choice": "auto",
+            }
+            try:
+                resp = await self._session.post(f"{self._base_url}/chat/completions", json=payload)
+                if resp.status == 200:
+                    break
+                err_text = await resp.text()
+                print(f"[LLM] Model {model_name} returned {resp.status}, trying fallback...")
+                await resp.release()
+                resp = None
+            except Exception as e:
+                print(f"[LLM] Model {model_name} error: {e}")
+                resp = None
+
+        if resp is None or resp.status != 200:
+            raise RuntimeError("All LLM models currently unavailable")
 
         buffer = ""
         tool_calls_buffer: Dict[int, Dict] = {}
+        stream_finished = False
 
-        async with self._session.post(f"{self._base_url}/chat/completions", json=payload) as resp:
-            if resp.status != 200:
-                error_text = await resp.text()
-                raise RuntimeError(f"LLM error: {resp.status} - {error_text}")
-
-            async for line in resp.content:
-                line = line.decode("utf-8").strip()
-                if not line or line == "data: [DONE]":
-                    continue
-                if line.startswith("data: "):
-                    line = line[6:]
-
-                try:
-                    data = json.loads(line)
-                    choices = data.get("choices", [])
-                    if not choices:
+        async with resp:
+            sse_buffer = ""
+            async for raw_bytes in resp.content:
+                if stream_finished:
+                    break
+                sse_buffer += raw_bytes.decode("utf-8", errors="replace")
+                while "\n" in sse_buffer:
+                    line, sse_buffer = sse_buffer.split("\n", 1)
+                    line = line.strip()
+                    if not line or line == "data: [DONE]":
+                        if line == "data: [DONE]":
+                            stream_finished = True
+                            break
                         continue
+                    if line.startswith("data: "):
+                        line = line[6:].strip()
 
-                    delta = choices[0].get("delta", {})
-                    finish_reason = choices[0].get("finish_reason")
+                    try:
+                        data = json.loads(line)
+                        choices = data.get("choices", [])
+                        if not choices:
+                            continue
 
-                    content = delta.get("content", "")
-                    tool_calls = delta.get("tool_calls")
+                        delta = choices[0].get("delta", {})
+                        finish_reason = (choices[0].get("finish_reason") or "").lower()
 
-                    if tool_calls:
-                        for tc in tool_calls:
-                            index = tc.get("index", 0)
-                            if index not in tool_calls_buffer:
-                                tool_calls_buffer[index] = {"id": "", "name": "", "arguments": ""}
-                            if tc.get("id"):
-                                tool_calls_buffer[index]["id"] = tc["id"]
-                            if tc.get("function", {}).get("name"):
-                                tool_calls_buffer[index]["name"] = tc["function"]["name"]
-                            if tc.get("function", {}).get("arguments"):
-                                tool_calls_buffer[index]["arguments"] += tc["function"]["arguments"]
+                        content = delta.get("content", "")
+                        tool_calls = delta.get("tool_calls")
 
-                    if content:
-                        buffer += content
-                        chunk = LLMChunk(
-                            content=content,
-                            is_final=False,
-                            response_id=response_id,
-                        )
-                        if on_chunk:
-                            on_chunk(chunk)
-                        yield chunk
+                        if tool_calls:
+                            for tc in tool_calls:
+                                index = tc.get("index", 0)
+                                if index not in tool_calls_buffer:
+                                    tool_calls_buffer[index] = {"id": "", "name": "", "arguments": ""}
+                                if tc.get("id"):
+                                    tool_calls_buffer[index]["id"] = tc["id"]
+                                if tc.get("function", {}).get("name"):
+                                    tool_calls_buffer[index]["name"] = tc["function"]["name"]
+                                if tc.get("function", {}).get("arguments"):
+                                    tool_calls_buffer[index]["arguments"] += tc["function"]["arguments"]
 
-                    if finish_reason == "tool_calls" and tool_calls_buffer:
-                        tool_call_list = []
-                        for idx, tc_data in tool_calls_buffer.items():
-                            try:
-                                args = json.loads(tc_data["arguments"])
-                            except json.JSONDecodeError:
-                                args = {}
-                            tool_call = ToolCall(
-                                name=tc_data["name"],
-                                arguments=args,
-                                call_id=tc_data["id"],
+                        if content:
+                            buffer += content
+                            chunk = LLMChunk(
+                                content=content,
+                                is_final=False,
                                 response_id=response_id,
                             )
-                            tool_call_list.append(tool_call)
+                            if on_chunk:
+                                on_chunk(chunk)
+                            yield chunk
 
-                        chunk = LLMChunk(
-                            content="",
-                            is_final=True,
-                            tool_calls=tool_call_list,
+                        if finish_reason in ("tool_calls", "tool_call") or (finish_reason in ("stop", "end_turn") and tool_calls_buffer):
+                            tool_call_list = []
+                            for idx, tc_data in tool_calls_buffer.items():
+                                try:
+                                    args = json.loads(tc_data["arguments"])
+                                except json.JSONDecodeError:
+                                    args = {}
+                                call_id = tc_data["id"] or f"call_{uuid.uuid4().hex[:8]}"
+                                tool_call = ToolCall(
+                                    name=tc_data["name"],
+                                    arguments=args,
+                                    call_id=call_id,
+                                    response_id=response_id,
+                                )
+                                tool_call_list.append(tool_call)
+
+                            chunk = LLMChunk(
+                                content="",
+                                is_final=True,
+                                tool_calls=tool_call_list,
+                                response_id=response_id,
+                            )
+                            if on_chunk:
+                                on_chunk(chunk)
+                            yield chunk
+                            tool_calls_buffer.clear()
+                            stream_finished = True
+                            break
+
+                        if finish_reason in ("stop", "end_turn") and buffer:
+                            chunk = LLMChunk(
+                                content="",
+                                is_final=True,
+                                response_id=response_id,
+                            )
+                            if on_chunk:
+                                on_chunk(chunk)
+                            yield chunk
+                            stream_finished = True
+                            break
+
+                    except json.JSONDecodeError:
+                        continue
+
+            # Fallback if stream completed without explicit finish_reason chunk
+            if not stream_finished:
+                if tool_calls_buffer:
+                    tool_call_list = []
+                    for idx, tc_data in tool_calls_buffer.items():
+                        try:
+                            args = json.loads(tc_data["arguments"])
+                        except json.JSONDecodeError:
+                            args = {}
+                        call_id = tc_data["id"] or f"call_{uuid.uuid4().hex[:8]}"
+                        tool_call = ToolCall(
+                            name=tc_data["name"],
+                            arguments=args,
+                            call_id=call_id,
                             response_id=response_id,
                         )
-                        if on_chunk:
-                            on_chunk(chunk)
-                        yield chunk
-                        break
+                        tool_call_list.append(tool_call)
 
-                    if finish_reason == "stop" and buffer:
-                        chunk = LLMChunk(
-                            content="",
-                            is_final=True,
-                            response_id=response_id,
-                        )
-                        if on_chunk:
-                            on_chunk(chunk)
-                        yield chunk
-                        break
-
-                except json.JSONDecodeError:
-                    continue
+                    chunk = LLMChunk(
+                        content="",
+                        is_final=True,
+                        tool_calls=tool_call_list,
+                        response_id=response_id,
+                    )
+                    if on_chunk:
+                        on_chunk(chunk)
+                    yield chunk
+                    tool_calls_buffer.clear()
+                elif buffer:
+                    chunk = LLMChunk(
+                        content="",
+                        is_final=True,
+                        response_id=response_id,
+                )
+                if on_chunk:
+                    on_chunk(chunk)
+                yield chunk
 
 
 class LLMManager:
@@ -223,6 +293,23 @@ class LLMManager:
 
     def add_assistant_message(self, content: str):
         self._conversation_history.append({"role": "assistant", "content": content})
+
+    def add_assistant_tool_calls(self, tool_calls: List[ToolCall]):
+        formatted = []
+        for tc in tool_calls:
+            formatted.append({
+                "id": tc.call_id,
+                "type": "function",
+                "function": {
+                    "name": tc.name,
+                    "arguments": json.dumps(tc.arguments) if not isinstance(tc.arguments, str) else tc.arguments,
+                },
+            })
+        self._conversation_history.append({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": formatted,
+        })
 
     def add_tool_result(self, call_id: str, result: Any):
         self._conversation_history.append({
@@ -263,7 +350,9 @@ class LLMManager:
                 tool_calls = chunk.tool_calls
             yield fenced
 
-        if full_response:
+        if tool_calls:
+            self.add_assistant_tool_calls(tool_calls)
+        elif full_response:
             self.add_assistant_message(full_response)
 
         for tool_call in tool_calls:

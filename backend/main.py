@@ -49,10 +49,25 @@ class ConnectionManager:
             except Exception:
                 pass
 
+    async def send_bytes(self, client_id: str, data: bytes):
+        ws = self.active_connections.get(client_id)
+        if ws:
+            try:
+                await ws.send_bytes(data)
+            except Exception:
+                pass
+
     async def broadcast(self, data: dict):
-        for client_id, ws in self.active_connections.items():
+        for client_id, ws in list(self.active_connections.items()):
             try:
                 await ws.send_json(data)
+            except Exception:
+                pass
+
+    async def broadcast_bytes(self, data: bytes):
+        for client_id, ws in list(self.active_connections.items()):
+            try:
+                await ws.send_bytes(data)
             except Exception:
                 pass
 
@@ -71,26 +86,36 @@ async def agent_state_callback(state: AgentState):
         })
 
 
-async def agent_transcript_callback(text: str, is_final: bool):
+async def agent_transcript_callback(text: str, is_final: bool, is_user: bool = False):
     for client_id in manager.active_connections:
         await manager.send_json(client_id, {
             "type": "transcript",
             "text": text,
             "is_final": is_final,
+            "is_user": is_user,
         })
 
 
 async def agent_metrics_callback(metrics: dict):
-    for client_id in manager.active_connections:
+    for client_id in list(manager.active_connections.keys()):
         await manager.send_json(client_id, {
             "type": "metrics",
             "data": metrics,
         })
 
 
+def agent_audio_callback(chunk: bytes):
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(manager.broadcast_bytes(chunk))
+    except RuntimeError:
+        pass
+
+
 voice_agent.on_state_change = agent_state_callback
 voice_agent.on_transcript = agent_transcript_callback
 voice_agent.on_metrics = agent_metrics_callback
+voice_agent.on_audio_chunk = agent_audio_callback
 
 
 @app.on_event("startup")
@@ -133,6 +158,11 @@ async def handle_client_message(client_id: str, data: dict):
             "new_response_id": new_response_id,
         })
 
+    elif msg_type in ("prompt", "message"):
+        text = data.get("text", "").strip()
+        if text:
+            voice_agent.process_text_input(text)
+
     elif msg_type == "get_state":
         await manager.send_json(client_id, {
             "type": "state",
@@ -141,6 +171,15 @@ async def handle_client_message(client_id: str, data: dict):
 
     elif msg_type == "ping":
         await manager.send_json(client_id, {"type": "pong"})
+
+
+@app.post("/api/prompt")
+async def post_prompt(payload: dict):
+    text = payload.get("text", "").strip()
+    if not text:
+        return {"error": "Missing text"}
+    voice_agent.process_text_input(text)
+    return {"status": "ok", "processed": text}
 
 
 @app.get("/health")

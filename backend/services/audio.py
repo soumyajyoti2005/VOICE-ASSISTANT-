@@ -37,16 +37,20 @@ class AudioCapture:
     def start(self):
         if self._running:
             return
-        self._pyaudio = pyaudio.PyAudio()
-        self._stream = self._pyaudio.open(
-            format=pyaudio.paInt16,
-            channels=self.channels,
-            rate=self.sample_rate,
-            input=True,
-            frames_per_buffer=self.chunk_size,
-            stream_callback=self._callback,
-        )
-        self._running = True
+        try:
+            self._pyaudio = pyaudio.PyAudio()
+            self._stream = self._pyaudio.open(
+                format=pyaudio.paInt16,
+                channels=self.channels,
+                rate=self.sample_rate,
+                input=True,
+                frames_per_buffer=self.chunk_size,
+                stream_callback=self._callback,
+            )
+            self._running = True
+        except Exception as e:
+            print(f"Warning: AudioCapture could not initialize mic hardware ({e}). Server will continue.")
+            self._running = False
 
     def _callback(self, in_data, frame_count, time_info, status):
         if self._running and self.on_chunk:
@@ -87,17 +91,21 @@ class AudioPlayback:
     def start(self):
         if self._running:
             return
-        self._pyaudio = pyaudio.PyAudio()
-        self._stream = self._pyaudio.open(
-            format=pyaudio.paInt16,
-            channels=self.channels,
-            rate=self.sample_rate,
-            output=True,
-        )
-        self._running = True
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._playback_loop, daemon=True)
-        self._thread.start()
+        try:
+            self._pyaudio = pyaudio.PyAudio()
+            self._stream = self._pyaudio.open(
+                format=pyaudio.paInt16,
+                channels=self.channels,
+                rate=self.sample_rate,
+                output=True,
+            )
+            self._running = True
+            self._stop_event.clear()
+            self._thread = threading.Thread(target=self._playback_loop, daemon=True)
+            self._thread.start()
+        except Exception as e:
+            print(f"Warning: AudioPlayback could not initialize speaker hardware ({e}). Playback via local hardware disabled.")
+            self._running = False
 
     def _playback_loop(self):
         while self._running or not self._buffer.empty():

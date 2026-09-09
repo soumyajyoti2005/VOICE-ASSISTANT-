@@ -66,14 +66,27 @@ function App() {
 
   const addTranscript = useCallback((text, isFinal, isUser) => {
     setTranscript(prev => {
+      if (!text || !text.trim()) return prev
+      const trimmed = text.trim()
+      if (prev.length > 0) {
+        const last = prev[prev.length - 1]
+        if (last.text === trimmed && last.isUser === isUser && last.isFinal && isFinal) {
+          return prev
+        }
+      }
       if (isFinal) {
-        return [...prev, { text, isUser, timestamp: Date.now() }]
+        if (prev.length > 0 && !prev[prev.length - 1].isFinal && prev[prev.length - 1].isUser === isUser) {
+          const updated = [...prev]
+          updated[updated.length - 1] = { text: trimmed, isUser, timestamp: Date.now(), isFinal: true }
+          return updated
+        }
+        return [...prev, { text: trimmed, isUser, timestamp: Date.now(), isFinal: true }]
       } else {
         const newTranscript = [...prev]
-        if (newTranscript.length > 0 && !newTranscript[newTranscript.length - 1].isFinal) {
-          newTranscript[newTranscript.length - 1] = { text, isUser, timestamp: Date.now() }
+        if (newTranscript.length > 0 && !newTranscript[newTranscript.length - 1].isFinal && newTranscript[newTranscript.length - 1].isUser === isUser) {
+          newTranscript[newTranscript.length - 1] = { text: trimmed, isUser, timestamp: Date.now(), isFinal: false }
         } else {
-          newTranscript.push({ text, isUser, timestamp: Date.now(), isFinal: false })
+          newTranscript.push({ text: trimmed, isUser, timestamp: Date.now(), isFinal: false })
         }
         return newTranscript
       }
@@ -81,46 +94,62 @@ function App() {
   }, [])
 
   const playAudioChunk = useCallback(async (audioData) => {
-    if (!audioContextRef.current) {
-      audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 })
-    }
-    const ctx = audioContextRef.current
-    if (ctx.state === 'suspended') await ctx.resume()
-
-    const arrayBuffer = audioData.buffer.slice(audioData.byteOffset, audioData.byteOffset + audioData.byteLength)
-    const audioBuffer = await ctx.decodeAudioData(arrayBuffer)
-    const source = ctx.createBufferSource()
-    source.buffer = audioBuffer
-    source.connect(ctx.destination)
-
-    audioQueueRef.current.push(source)
-
-    if (!isPlayingRef.current) {
-      isPlayingRef.current = true
-      setAudioPlaying(true)
-      playNext()
-    }
-
-    function playNext() {
-      const next = audioQueueRef.current.shift()
-      if (next) {
-        next.onended = playNext
-        next.start(0)
-      } else {
-        isPlayingRef.current = false
-        setAudioPlaying(false)
+    try {
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 })
       }
+      const ctx = audioContextRef.current
+      if (ctx.state === 'suspended') await ctx.resume()
+
+      // Convert raw 16-bit linear PCM (pcm_s16le, 24kHz) to Float32 AudioBuffer
+      const dataView = new DataView(audioData.buffer, audioData.byteOffset, audioData.byteLength)
+      const numSamples = Math.floor(audioData.byteLength / 2)
+      if (numSamples === 0) return
+
+      const audioBuffer = ctx.createBuffer(1, numSamples, 24000)
+      const channelData = audioBuffer.getChannelData(0)
+      for (let i = 0; i < numSamples; i++) {
+        channelData[i] = dataView.getInt16(i * 2, true) / 32768.0
+      }
+
+      const source = ctx.createBufferSource()
+      source.buffer = audioBuffer
+      source.connect(ctx.destination)
+
+      audioQueueRef.current.push(source)
+
+      if (!isPlayingRef.current) {
+        isPlayingRef.current = true
+        setAudioPlaying(true)
+        playNext()
+      }
+
+      function playNext() {
+        const next = audioQueueRef.current.shift()
+        if (next) {
+          next.onended = playNext
+          try {
+            next.start(0)
+          } catch (e) {
+            playNext()
+          }
+        } else {
+          isPlayingRef.current = false
+          setAudioPlaying(false)
+        }
+      }
+    } catch (err) {
+      console.error('Audio chunk playback error:', err)
     }
   }, [])
 
   const stopAudio = useCallback(() => {
+    audioQueueRef.current.forEach(source => {
+      try { source.stop() } catch (e) {}
+    })
     audioQueueRef.current = []
     isPlayingRef.current = false
     setAudioPlaying(false)
-    if (audioContextRef.current) {
-      audioContextRef.current.close()
-      audioContextRef.current = null
-    }
   }, [])
 
   const connect = useCallback(() => {
@@ -160,10 +189,21 @@ function App() {
     setWs(websocket)
   }, [clientId, playAudioChunk])
 
+  const formatStatus = (raw) => {
+    switch (raw?.toLowerCase()) {
+      case 'listening': return 'Listening…'
+      case 'processing': return 'Thinking…'
+      case 'tool_running': return 'Searching…'
+      case 'speaking': return 'Speaking…'
+      case 'idle': return 'Tap to talk'
+      default: return raw || 'Tap to talk'
+    }
+  }
+
   const handleMessage = (msg) => {
     switch (msg.type) {
       case 'state':
-        if (msg.status) setStatus(msg.status)
+        if (msg.status) setStatus(formatStatus(msg.status))
         if (msg.metrics) {
           setDebugData(prev => ({
             ...prev,
@@ -174,13 +214,14 @@ function App() {
         }
         break
       case 'transcript':
-        addTranscript(msg.text, msg.is_final, false)
+        addTranscript(msg.text, msg.is_final, msg.is_user ?? false)
         break
       case 'interrupted':
         stopAudio()
         break
       case 'connected':
         setDebugData(prev => ({ ...prev, activeResponseId: msg.state?.active_response_id || 0 }))
+        if (msg.state?.status) setStatus(formatStatus(msg.state.status))
         break
     }
   }
@@ -192,6 +233,9 @@ function App() {
   }, [ws])
 
   const handleMicClick = () => {
+    if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+      audioContextRef.current.resume()
+    }
     if (status === 'Speaking…' || audioPlaying) {
       sendMessage({ type: 'interrupt' })
       stopAudio()
@@ -204,7 +248,14 @@ function App() {
 
   useEffect(() => {
     connect()
+    const unlockAudio = () => {
+      if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+        audioContextRef.current.resume()
+      }
+    }
+    window.addEventListener('click', unlockAudio)
     return () => {
+      window.removeEventListener('click', unlockAudio)
       if (ws) ws.close()
       stopAudio()
     }
@@ -212,7 +263,21 @@ function App() {
 
   const statusClass = status === 'Listening…' ? 'listening' :
                       status === 'Speaking…' ? 'speaking' :
-                      status === 'Thinking…' ? 'thinking' : 'idle'
+                      (status === 'Thinking…' || status === 'Searching…') ? 'thinking' : 'idle'
+
+  const [inputText, setInputText] = useState('')
+
+  const handleSendText = (e) => {
+    e.preventDefault()
+    if (!inputText.trim()) return
+    if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+      audioContextRef.current.resume()
+    }
+    const text = inputText.trim()
+    sendMessage({ type: 'prompt', text })
+    addTranscript(text, true, true)
+    setInputText('')
+  }
 
   return (
     <div className="app">
@@ -226,7 +291,7 @@ function App() {
             <div className="turn-text">{turn.text}</div>
           </div>
         ))}
-        {!transcript.length && <div className="empty-hint">Tap the mic to start talking</div>}
+        {!transcript.length && <div className="empty-hint">Mic is live! Speak anytime, or send a prompt below</div>}
       </div>
 
       <div className="status-bar">
@@ -241,8 +306,18 @@ function App() {
       >
         {status === 'Speaking…' || audioPlaying ? STOP_SVG :
          status === 'Listening…' ? WAVE_SVG :
-         status === 'Thinking…' ? SPINNER_SVG : MIC_SVG}
+         (status === 'Thinking…' || status === 'Searching…') ? SPINNER_SVG : MIC_SVG}
       </button>
+
+      <form className="text-input-form" onSubmit={handleSendText}>
+        <input
+          type="text"
+          placeholder="Or type a message to test voice..."
+          value={inputText}
+          onChange={(e) => setInputText(e.target.value)}
+        />
+        <button type="submit">Send</button>
+      </form>
 
       {debugOpen && (
         <div className="debug-panel">

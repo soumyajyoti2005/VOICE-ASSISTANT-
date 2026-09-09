@@ -19,7 +19,7 @@ class RimeAudioChunk:
 class RimeTTSClient:
     def __init__(self):
         self._session: Optional[aiohttp.ClientSession] = None
-        self._base_url = config.rime_base_url
+        self._base_url = config.rime_base_url.rstrip("/")
         self._api_key = config.rime_api_key
         self._voice = config.rime_voice
         self._model = config.rime_model
@@ -47,46 +47,54 @@ class RimeTTSClient:
         response_id: int,
         on_chunk: Optional[callable] = None,
     ) -> AsyncGenerator[RimeAudioChunk, None]:
-        if not self._session:
-            raise RuntimeError("RimeTTSClient not initialized. Use async context manager.")
+        if not self._session or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "audio/pcm",
+                },
+                timeout=aiohttp.ClientTimeout(total=30),
+            )
 
         payload = {
             "text": text,
-            "voice": self._voice,
-            "model": self._model,
-            "sample_rate": self._sample_rate,
-            "encoding": self._encoding,
-            "streaming": True,
+            "speaker": self._voice,
+            "modelId": self._model,
         }
 
-        async with self._session.post(f"{self._base_url}/tts/stream", json=payload) as resp:
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            "Accept": "audio/pcm",
+        }
+
+        endpoint = f"{self._base_url}/rime-tts"
+        async with self._session.post(endpoint, headers=headers, json=payload) as resp:
             if resp.status != 200:
                 error_text = await resp.text()
                 raise RuntimeError(f"Rime TTS error: {resp.status} - {error_text}")
 
-            async for line in resp.content:
-                if not line:
+            async for audio_bytes in resp.content.iter_chunked(2048):
+                if not audio_bytes:
                     continue
-                line = line.decode("utf-8").strip()
-                if not line or line == "data: [DONE]":
-                    continue
-                if line.startswith("data: "):
-                    line = line[6:]
-                try:
-                    data = json.loads(line)
-                    if "audio" in data:
-                        audio_bytes = bytes.fromhex(data["audio"])
-                        is_final = data.get("is_final", False)
-                        chunk = RimeAudioChunk(
-                            audio_data=audio_bytes,
-                            is_final=is_final,
-                            response_id=response_id,
-                        )
-                        if on_chunk:
-                            on_chunk(chunk)
-                        yield chunk
-                except json.JSONDecodeError:
-                    continue
+                chunk = RimeAudioChunk(
+                    audio_data=audio_bytes,
+                    is_final=False,
+                    response_id=response_id,
+                )
+                if on_chunk:
+                    on_chunk(chunk)
+                yield chunk
+
+            final_chunk = RimeAudioChunk(
+                audio_data=b"",
+                is_final=True,
+                response_id=response_id,
+            )
+            if on_chunk:
+                on_chunk(final_chunk)
+            yield final_chunk
 
 
 class RimeTTSManager:
@@ -121,7 +129,7 @@ class RimeTTSManager:
         if not self._client:
             raise RuntimeError("RimeTTSManager not initialized")
 
-        async def _on_chunk(chunk: RimeAudioChunk):
+        def _on_chunk(chunk: RimeAudioChunk):
             if self._playback_callback:
                 self._playback_callback(chunk.audio_data)
 

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Generic, TypeVar, Optional, Callable, Awaitable
+from typing import Generic, TypeVar, Optional, Callable, Awaitable, Any
 import asyncio
 import time
 
@@ -29,9 +29,13 @@ def check_response_id(response_id: int, current_id: Optional[int] = None) -> boo
     return response_id == current_id
 
 
-def fence_result(result: TaggedResult[T], current_id: Optional[int] = None) -> Optional[T]:
+def fence_result(result: Any, current_id: Optional[int] = None) -> Optional[Any]:
+    if result is None or not hasattr(result, "response_id"):
+        return None
     if check_response_id(result.response_id, current_id):
-        return result.data
+        if hasattr(result, "data"):
+            return result.data
+        return result
     return None
 
 
