@@ -8,17 +8,27 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
+# Python virtual environments
+.venv/
+.venv*/
 venv/
 env/
 ENV/
 backend/venv/
+backend/.venv/
+**/venv/
+**/.venv/
 
-# Backend
+# Backend & Metrics
 backend/metrics/results.csv
 backend/metrics/stress_results.csv
+metrics/*.csv
+metrics/results.csv
+metrics/stress_results.csv
 
-# Frontend
+# Frontend & Node
+node_modules/
+**/node_modules/
 frontend/node_modules/
 frontend/dist/
 frontend/build/
