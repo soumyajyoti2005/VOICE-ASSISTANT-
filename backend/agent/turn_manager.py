@@ -143,8 +143,8 @@ class TurnManager:
         is_voice = energy > current_threshold
 
         if is_voice:
-            # Immediate barge-in on new speech if audio is playing or tool is executing
-            if is_audio_playing or state_manager.state.tool_running:
+            # Immediate barge-in on new speech if audio is playing
+            if is_audio_playing:
                 self.interrupt()
 
             if not self._speech_detected:
@@ -186,26 +186,28 @@ class TurnManager:
         if mean_energy < 0.03:
             return
 
-        # Ensure any leftover playback from previous turns is cleared
-        self.audio.stop_playback_immediately()
+        # We pass a dummy response_id for transcription since we haven't committed to a new turn yet
+        dummy_id = state_manager.get_current_response_id() + 1
 
+        # Transcribe with Groq whisper-large-v3-turbo
+        text = await stt_client.transcribe_audio(pcm_data, dummy_id, sample_rate=sample_rate)
+
+        if not text:
+            return
+
+        # Check for junk hallucination transcripts
+        clean_text = text.strip().lower().rstrip(".!?,")
+        if not clean_text or (clean_text in ("thank you", "thanks", "thanks for watching", "mm-hmm", "yeah", "you", "bye") and len(pcm_data) < sample_rate * 2 * 1.5):
+            return
+
+        # Now that we have a valid transcript, commit to a new turn
+        self.audio.stop_playback_immediately()
         state_manager.new_turn()
         response_id = state_manager.get_current_response_id()
+        
         # Mark T0: User speech ended
         state_manager.state.current_turn_t0 = time.perf_counter()
         self._set_status(TurnStatus.PROCESSING)
-
-        # Transcribe with Groq whisper-large-v3-turbo
-        text = await stt_client.transcribe_audio(pcm_data, response_id, sample_rate=sample_rate)
-
-        if not text or state_manager.is_stale(response_id):
-            self._set_status(TurnStatus.LISTENING)
-            return
-
-        clean_text = text.strip().lower().rstrip(".!?,")
-        if clean_text in ("thank you", "thanks", "thanks for watching", "mm-hmm", "yeah", "you", "bye") and len(pcm_data) < sample_rate * 2 * 1.2:
-            self._set_status(TurnStatus.LISTENING)
-            return
 
         # Mark T1: STT transcript ready
         state_manager.state.mark_t1()
