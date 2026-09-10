@@ -73,6 +73,7 @@ class StreamingSTTClient:
     ) -> Optional[str]:
         """Transcribe an audio slice via Groq's OpenAI-compatible /audio/transcriptions endpoint."""
         if not pcm_data or not self._running:
+            print(f"[STT Debug] Returning None because pcm_data is empty ({not pcm_data}) or not running ({not self._running})")
             return None
 
         if not self._session or self._session.closed:
@@ -105,9 +106,6 @@ class StreamingSTTClient:
 
                 data = await resp.json()
                 text = data.get("text", "").strip()
-
-                if state_manager.is_stale(response_id):
-                    return None
 
                 return text
         except Exception as e:

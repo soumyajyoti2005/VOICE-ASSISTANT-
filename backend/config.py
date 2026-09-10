@@ -37,7 +37,7 @@ class Config:
     audio_channels: int = 1
     audio_chunk_size: int = 1024
 
-    vad_threshold: float = 0.06
+    vad_threshold: float = 0.01
     vad_silence_duration: float = 0.8
 
     @classmethod
@@ -76,7 +76,7 @@ class Config:
             audio_sample_rate=int(os.getenv("AUDIO_SAMPLE_RATE", "16000")),
             audio_channels=int(os.getenv("AUDIO_CHANNELS", "1")),
             audio_chunk_size=int(os.getenv("AUDIO_CHUNK_SIZE", "1024")),
-            vad_threshold=float(os.getenv("VAD_THRESHOLD", "0.06")),
+            vad_threshold=float(os.getenv("VAD_THRESHOLD", "0.01")),
             vad_silence_duration=float(os.getenv("VAD_SILENCE_DURATION", "0.8")),
         )
 

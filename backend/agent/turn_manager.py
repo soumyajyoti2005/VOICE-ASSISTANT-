@@ -183,22 +183,25 @@ class TurnManager:
             return
 
         mean_energy = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2))) / 32768.0
-        if mean_energy < 0.03:
+        print(f"[VAD] _process_audio_turn called with mean_energy: {mean_energy:.4f}")
+        if mean_energy < 0.005:
+            print("[VAD] Energy too low for transcription")
             return
 
-        # We pass a dummy response_id for transcription since we haven't committed to a new turn yet
-        dummy_id = state_manager.get_current_response_id() + 1
-
-        # Transcribe with Groq whisper-large-v3-turbo
+        # We pass the current response_id for transcription since we haven't committed to a new turn yet
+        dummy_id = state_manager.get_current_response_id()
         text = await stt_client.transcribe_audio(pcm_data, dummy_id, sample_rate=sample_rate)
+        print(f"[STT] Raw transcript: {text!r}")
 
         if not text:
             return
 
-        # Check for junk hallucination transcripts
         clean_text = text.strip().lower().rstrip(".!?,")
         if not clean_text or (clean_text in ("thank you", "thanks", "thanks for watching", "mm-hmm", "yeah", "you", "bye") and len(pcm_data) < sample_rate * 2 * 1.5):
+            print(f"[STT] Ignored clean_text: {clean_text!r}")
             return
+
+        print(f"[STT] Accepted clean_text: {clean_text!r}")
 
         # Now that we have a valid transcript, commit to a new turn
         self.audio.stop_playback_immediately()

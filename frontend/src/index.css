@@ -1,13 +1,33 @@
-* {
+/* Global reset — design tokens live in styles/theme.css, component styles in
+   styles/components.css and layout in styles/App.css (imported by App.jsx). */
+
+*,
+*::before,
+*::after {
   box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
 }
 
 body {
-  margin: 0;
   min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overscroll-behavior: none;
 }
 
-#root {
-  width: 100%;
-  min-height: 100vh;
+button {
+  font-family: inherit;
+}
+
+input {
+  font-family: inherit;
 }

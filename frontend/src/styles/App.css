@@ -1,0 +1,77 @@
+/* ============================================================
+   App layout — full-viewport shell, centered conversation column
+   ============================================================ */
+.app {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  background:
+    radial-gradient(1100px 460px at 50% -180px, rgba(37, 99, 235, 0.14), transparent 65%),
+    radial-gradient(900px 420px at 50% 115%, rgba(37, 99, 235, 0.08), transparent 60%),
+    var(--bg);
+}
+
+.app-glow {
+  position: absolute;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.app-glow--top {
+  top: -220px;
+  left: 50%;
+  width: 640px;
+  height: 440px;
+  transform: translateX(-50%);
+  background: radial-gradient(closest-side, rgba(37, 99, 235, 0.16), transparent);
+}
+
+.app-glow--bottom {
+  bottom: -260px;
+  left: 50%;
+  width: 720px;
+  height: 460px;
+  transform: translateX(-50%);
+  background: radial-gradient(closest-side, rgba(37, 99, 235, 0.1), transparent);
+}
+
+.app-frame {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 800px;
+  height: 100%;
+  margin: 0 auto;
+  padding: 0 20px;
+  min-height: 0;
+}
+
+/* Slim, theme-matched scrollbars */
+.chat-area {
+  scrollbar-width: thin;
+  scrollbar-color: #2A3142 transparent;
+}
+
+.chat-area::-webkit-scrollbar {
+  width: 6px;
+}
+
+.chat-area::-webkit-scrollbar-thumb {
+  background: #2A3142;
+  border-radius: 9999px;
+}
+
+.chat-area::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@media (max-width: 640px) {
+  .app-frame {
+    padding: 0 12px;
+  }
+}

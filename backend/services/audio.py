@@ -53,6 +53,15 @@ class AudioCapture:
             self._running = False
 
     def _callback(self, in_data, frame_count, time_info, status):
+        if getattr(self, '_frame_counter', None) is None:
+            self._frame_counter = 0
+        self._frame_counter += 1
+        if self._frame_counter % 50 == 0:
+            import numpy as np
+            samples = np.frombuffer(in_data, dtype=np.int16)
+            energy = float(np.sqrt(np.mean(samples.astype(np.float32)**2))) / 32768.0 if len(samples) > 0 else 0
+            print(f"[AudioCapture] Energy: {energy:.4f}")
+
         if self._running and self.on_chunk:
             chunk = AudioChunk(
                 data=in_data,
