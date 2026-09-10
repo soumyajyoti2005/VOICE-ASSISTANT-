@@ -29,6 +29,7 @@ class ToolCall:
     status: ToolCallStatus = ToolCallStatus.PENDING
     result: Optional[Any] = None
     response_id: int = 0
+    extra_content: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -106,7 +107,7 @@ class StreamingLLMClient:
             raise RuntimeError("LLMClient not initialized")
 
         models_to_try = [self._model]
-        for fb in ["gemini-3.1-flash-lite", "gemini-flash-lite-latest", "gemini-3.5-flash"]:
+        for fb in ["gemini-3.1-flash-lite", "gemini-flash-lite-latest", "gemini-flash-latest"]:
             if fb not in models_to_try:
                 models_to_try.append(fb)
 
@@ -125,7 +126,7 @@ class StreamingLLMClient:
                 if resp.status == 200:
                     break
                 err_text = await resp.text()
-                print(f"[LLM] Model {model_name} returned {resp.status}, trying fallback...")
+                print(f"[LLM] Model {model_name} returned {resp.status}: {err_text}, trying fallback...")
                 await resp.release()
                 resp = None
             except Exception as e:
@@ -172,7 +173,9 @@ class StreamingLLMClient:
                             for tc in tool_calls:
                                 index = tc.get("index", 0)
                                 if index not in tool_calls_buffer:
-                                    tool_calls_buffer[index] = {"id": "", "name": "", "arguments": ""}
+                                    tool_calls_buffer[index] = {"id": "", "name": "", "arguments": "", "extra_content": None}
+                                if tc.get("extra_content"):
+                                    tool_calls_buffer[index]["extra_content"] = tc["extra_content"]
                                 if tc.get("id"):
                                     tool_calls_buffer[index]["id"] = tc["id"]
                                 if tc.get("function", {}).get("name"):
@@ -204,6 +207,7 @@ class StreamingLLMClient:
                                     arguments=args,
                                     call_id=call_id,
                                     response_id=response_id,
+                                    extra_content=tc_data.get("extra_content"),
                                 )
                                 tool_call_list.append(tool_call)
 
@@ -297,17 +301,20 @@ class LLMManager:
     def add_assistant_tool_calls(self, tool_calls: List[ToolCall]):
         formatted = []
         for tc in tool_calls:
-            formatted.append({
+            tc_dict = {
                 "id": tc.call_id,
                 "type": "function",
                 "function": {
                     "name": tc.name,
                     "arguments": json.dumps(tc.arguments) if not isinstance(tc.arguments, str) else tc.arguments,
                 },
-            })
+            }
+            if tc.extra_content:
+                tc_dict["extra_content"] = tc.extra_content
+            formatted.append(tc_dict)
         self._conversation_history.append({
             "role": "assistant",
-            "content": None,
+            "content": "",
             "tool_calls": formatted,
         })
 
@@ -322,9 +329,10 @@ class LLMManager:
         system_prompt = {
             "role": "system",
             "content": (
-                "You are a helpful voice assistant. Keep responses concise and natural for speech. "
-                "Use the search_restaurants tool for food/dining queries. Use web_search for general queries. "
-                "When a tool is running, you can provide status updates without calling tools."
+                "You are a lightning-fast voice assistant. Keep responses brief (1-2 sentences max), crisp, and natural for speech. "
+                "Answer knowledge questions directly from your knowledge base without calling tools. "
+                "Only call search_restaurants if the user asks for restaurant recommendations or dining. "
+                "Only call web_search if the user explicitly asks to search the web or for current news/weather."
             ),
         }
         return [system_prompt] + self._conversation_history

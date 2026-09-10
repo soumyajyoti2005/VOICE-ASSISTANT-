@@ -120,7 +120,9 @@ class TurnManager:
             return
 
         energy = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2))) / 32768.0
-        is_voice = energy > config.vad_threshold
+        # If audio is playing through speaker, require higher energy to avoid self-interrupting
+        current_threshold = 0.22 if state_manager.state.audio_playing else config.vad_threshold
+        is_voice = energy > current_threshold
 
         if is_voice:
             # Immediate barge-in on new speech if audio is playing or tool is executing
@@ -163,7 +165,7 @@ class TurnManager:
             return
 
         mean_energy = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2))) / 32768.0
-        if mean_energy < 0.04:
+        if mean_energy < 0.03:
             return
 
         state_manager.new_turn()
@@ -176,14 +178,12 @@ class TurnManager:
         text = await stt_client.transcribe_audio(pcm_data, response_id, sample_rate=sample_rate)
 
         if not text or state_manager.is_stale(response_id):
-            if not state_manager.is_stale(response_id):
-                self._set_status(TurnStatus.LISTENING)
+            self._set_status(TurnStatus.LISTENING)
             return
 
         clean_text = text.strip().lower().rstrip(".!?,")
         if clean_text in ("thank you", "thanks", "thanks for watching", "mm-hmm", "yeah", "you", "bye") and len(pcm_data) < sample_rate * 2 * 1.2:
-            if not state_manager.is_stale(response_id):
-                self._set_status(TurnStatus.LISTENING)
+            self._set_status(TurnStatus.LISTENING)
             return
 
         # Mark T1: STT transcript ready
@@ -203,12 +203,8 @@ class TurnManager:
         if self.on_transcript:
             self._send_transcript(result.text, result.is_final, True)
 
-        if result.is_final and result.text.strip():
-            state_manager.state.mark_t1()
-            self._process_user_turn(result.text, result.response_id)
-
     def _process_user_turn(self, text: str, response_id: int):
-        if self._pending_llm_task:
+        if self._pending_llm_task and not self._pending_llm_task.done():
             self._pending_llm_task.cancel()
 
         self._pending_llm_task = asyncio.create_task(
@@ -222,6 +218,7 @@ class TurnManager:
 
         sentence_buffer = ""
         tool_calls = []
+        first_chunk_sent = False
 
         try:
             async for chunk in llm_manager.process_turn(text, response_id, on_chunk=self._handle_llm_chunk):
@@ -234,58 +231,67 @@ class TurnManager:
                     tool_calls = chunk.tool_calls
                     self._set_status(TurnStatus.TOOL_RUNNING)
                     state_manager.set_tool_running(True)
-                    self._pending_tool_task = asyncio.create_task(
-                        self._handle_tool_calls(tool_calls, response_id)
-                    )
 
-                if chunk.is_final and not chunk.tool_calls:
-                    if sentence_buffer.strip():
+                # Sentence-level streaming: dispatch first sentence immediately on punctuation boundary
+                if not tool_calls and not first_chunk_sent:
+                    for delimiter in [". ", "? ", "! ", ".\n", "!\n", "?\n"]:
+                        if delimiter in sentence_buffer:
+                            parts = sentence_buffer.split(delimiter, 1)
+                            first_sentence = parts[0] + delimiter.strip()
+                            if len(first_sentence.strip()) > 8:
+                                first_chunk_sent = True
+                                sentence_buffer = parts[1]
+                                state_manager.state.mark_t3()
+                                await self._stream_to_rime(first_sentence.strip(), response_id)
+                                break
+
+            # Stream remaining buffer after LLM loop
+            if not tool_calls and sentence_buffer.strip() and not state_manager.is_stale(response_id):
+                if not first_chunk_sent:
+                    state_manager.state.mark_t3()
+                await self._stream_to_rime(sentence_buffer.strip(), response_id)
+
+            # If tool calls occurred, stream follow-up answer from LLM with sentence-level streaming
+            if tool_calls and not state_manager.is_stale(response_id):
+                self._set_status(TurnStatus.PROCESSING)
+                follow_up_messages = llm_manager.get_messages()
+                follow_up_buffer = ""
+                tool_first_sent = False
+                async for chunk in llm_manager._client.stream_completion(
+                    follow_up_messages, response_id
+                ):
+                    if state_manager.is_stale(chunk.response_id):
+                        return
+                    follow_up_buffer += chunk.content
+                    if not tool_first_sent:
+                        for delimiter in [". ", "? ", "! ", ".\n", "!\n", "?\n"]:
+                            if delimiter in follow_up_buffer:
+                                parts = follow_up_buffer.split(delimiter, 1)
+                                first_sentence = parts[0] + delimiter.strip()
+                                if len(first_sentence.strip()) > 8:
+                                    tool_first_sent = True
+                                    follow_up_buffer = parts[1]
+                                    state_manager.state.mark_t3()
+                                    await self._stream_to_rime(first_sentence.strip(), response_id)
+                                    break
+
+                if follow_up_buffer.strip() and not state_manager.is_stale(response_id):
+                    if not tool_first_sent:
                         state_manager.state.mark_t3()
-                        await self._stream_to_rime(sentence_buffer.strip(), response_id)
+                    llm_manager.add_assistant_message(follow_up_buffer.strip())
+                    await self._stream_to_rime(follow_up_buffer.strip(), response_id)
 
         except asyncio.CancelledError:
             pass
         except Exception as e:
             print(f"LLM pipeline error: {e}")
-            if not state_manager.is_stale(response_id):
-                self._set_status(TurnStatus.LISTENING)
+        finally:
+            state_manager.set_tool_running(False)
+            state_manager.set_audio_playing(False)
+            self._set_status(TurnStatus.LISTENING)
 
     def _handle_llm_chunk(self, chunk: LLMChunk):
         pass
-
-    async def _handle_tool_calls(self, tool_calls: List, response_id: int):
-        try:
-            for tool_call in tool_calls:
-                if state_manager.is_stale(response_id):
-                    tool_call.status = "cancelled"
-                    return
-
-            if self._pending_tool_task:
-                await self._pending_tool_task
-
-            if state_manager.is_stale(response_id):
-                return
-
-            follow_up_messages = llm_manager.get_messages()
-            sentence_buffer = ""
-
-            async for chunk in llm_manager._client.stream_completion(
-                follow_up_messages, response_id
-            ):
-                if state_manager.is_stale(chunk.response_id):
-                    return
-                sentence_buffer += chunk.content
-                if chunk.is_final and sentence_buffer.strip():
-                    state_manager.state.mark_t3()
-                    await self._stream_to_rime(sentence_buffer.strip(), response_id)
-                    break
-
-        except asyncio.CancelledError:
-            pass
-        finally:
-            state_manager.set_tool_running(False)
-            if not state_manager.is_stale(response_id):
-                self._set_status(TurnStatus.LISTENING)
 
     async def _stream_to_rime(self, text: str, response_id: int):
         if state_manager.is_stale(response_id):
@@ -302,7 +308,6 @@ class TurnManager:
             async for chunk in rime_tts_manager.speak(text, response_id):
                 if state_manager.is_stale(chunk.response_id):
                     self.audio.stop_playback_immediately()
-                    state_manager.set_audio_playing(False)
                     return
 
                 if not state_manager.state.current_turn_t5:
@@ -317,8 +322,7 @@ class TurnManager:
             print(f"[TurnManager] Rime TTS playback error: {e}")
         finally:
             state_manager.set_audio_playing(False)
-            if not state_manager.is_stale(response_id):
-                self._set_status(TurnStatus.LISTENING)
+            self._set_status(TurnStatus.LISTENING)
 
     def interrupt(self) -> int:
         new_response_id = state_manager.interrupt()
@@ -327,11 +331,11 @@ class TurnManager:
         self._speech_buffer = bytearray()
         self._silence_frames = 0
 
-        if self._pending_llm_task:
+        if self._pending_llm_task and not self._pending_llm_task.done():
             self._pending_llm_task.cancel()
             self._pending_llm_task = None
 
-        if self._pending_tool_task:
+        if self._pending_tool_task and not self._pending_tool_task.done():
             self._pending_tool_task.cancel()
             self._pending_tool_task = None
 

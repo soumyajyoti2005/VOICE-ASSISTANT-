@@ -109,15 +109,6 @@ class StreamingSTTClient:
                 if state_manager.is_stale(response_id):
                     return None
 
-                if text and self._result_callback:
-                    result = STTResult(
-                        text=text,
-                        is_final=True,
-                        response_id=response_id,
-                        timestamp=asyncio.get_event_loop().time(),
-                    )
-                    self._result_callback(result)
-
                 return text
         except Exception as e:
             print(f"Groq STT request failed: {e}")
