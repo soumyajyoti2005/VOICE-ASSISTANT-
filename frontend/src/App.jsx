@@ -279,6 +279,11 @@ function App() {
                       (status === 'Thinking…' || status === 'Searching…') ? 'thinking' : 'idle'
 
   const [inputText, setInputText] = useState('')
+  const messagesEndRef = useRef(null)
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [transcript])
 
   const handleSendText = (e) => {
     e.preventDefault()
@@ -305,6 +310,7 @@ function App() {
           </div>
         ))}
         {!transcript.length && <div className="empty-hint">Mic is live! Speak anytime, or send a prompt below</div>}
+        <div ref={messagesEndRef} />
       </div>
 
       <div className="status-bar">
