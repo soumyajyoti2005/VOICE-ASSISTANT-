@@ -86,7 +86,7 @@ async def web_search(
                                 extractor = HTMLTextExtractor()
                                 extractor.feed(page_html)
                                 # Extract top informative paragraphs
-                                page_text = " ".join(extractor.texts[:80])[:1200]
+                                page_text = " ".join(extractor.texts[:300])[:6000]
                 except Exception as scrape_err:
                     print(f"[WebSearch] Page fetch notice: {scrape_err}")
 

@@ -33,13 +33,17 @@ class ConnectionManager:
         self.connection_states: Dict[str, AgentState] = {}
 
     async def connect(self, websocket: WebSocket, client_id: str):
+        if len(self.active_connections) == 0:
+            await voice_agent.start()
         await websocket.accept()
         self.active_connections[client_id] = websocket
         self.connection_states[client_id] = AgentState()
 
-    def disconnect(self, client_id: str):
+    async def disconnect(self, client_id: str):
         self.active_connections.pop(client_id, None)
         self.connection_states.pop(client_id, None)
+        if len(self.active_connections) == 0:
+            await voice_agent.stop()
 
     async def send_json(self, client_id: str, data: dict):
         ws = self.active_connections.get(client_id)
@@ -120,12 +124,12 @@ voice_agent.on_audio_chunk = agent_audio_callback
 
 @app.on_event("startup")
 async def startup_event():
-    await voice_agent.start()
+    pass
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    await voice_agent.stop()
+    pass
 
 
 @app.websocket("/ws/{client_id}")
@@ -142,10 +146,10 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
             data = await websocket.receive_json()
             await handle_client_message(client_id, data)
     except WebSocketDisconnect:
-        manager.disconnect(client_id)
+        await manager.disconnect(client_id)
     except Exception as e:
         print(f"WebSocket error: {e}")
-        manager.disconnect(client_id)
+        await manager.disconnect(client_id)
 
 
 async def handle_client_message(client_id: str, data: dict):
