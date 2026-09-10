@@ -11,6 +11,17 @@ const MIC_SVG = (
   </svg>
 )
 
+const MIC_OFF_SVG = (
+  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="2" y1="2" x2="22" y2="22" />
+    <path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2" />
+    <path d="M5 10v2a7 7 0 0 0 12 5" />
+    <path d="M15 9.34V5a3 3 0 0 0-5.68-1.33" />
+    <path d="M9 9v3a3 3 0 0 0 5.12 2.12" />
+    <line x1="12" y1="19" x2="12" y2="22" />
+  </svg>
+)
+
 const STOP_SVG = (
   <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
     <rect x="6" y="6" width="12" height="12" rx="2" />
@@ -195,12 +206,13 @@ function App() {
       case 'processing': return 'Thinking…'
       case 'tool_running': return 'Searching…'
       case 'speaking': return 'Speaking…'
+      case 'paused': return 'Paused'
       case 'idle': return 'Tap to talk'
       default: return raw || 'Tap to talk'
     }
   }
 
-  const handleMessage = (msg) => {
+  const handleMessage = useCallback((msg) => {
     switch (msg.type) {
       case 'state':
         if (msg.status) setStatus(formatStatus(msg.status))
@@ -214,17 +226,18 @@ function App() {
         }
         break
       case 'transcript':
-        addTranscript(msg.text, msg.is_final, msg.is_user ?? false)
+        addTranscript(msg.text, msg.is_final, msg.is_user)
+        break
+      case 'metrics':
         break
       case 'interrupted':
         stopAudio()
         break
       case 'connected':
-        setDebugData(prev => ({ ...prev, activeResponseId: msg.state?.active_response_id || 0 }))
         if (msg.state?.status) setStatus(formatStatus(msg.state.status))
         break
     }
-  }
+  }, [addTranscript, stopAudio])
 
   const sendMessage = useCallback((msg) => {
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -241,8 +254,7 @@ function App() {
       stopAudio()
       setStatus('Listening…')
     } else {
-      sendMessage({ type: 'interrupt' })
-      setStatus('Listening…')
+      sendMessage({ type: 'toggle_listening' })
     }
   }
 
@@ -263,6 +275,7 @@ function App() {
 
   const statusClass = status === 'Listening…' ? 'listening' :
                       status === 'Speaking…' ? 'speaking' :
+                      status === 'Paused' ? 'paused' :
                       (status === 'Thinking…' || status === 'Searching…') ? 'thinking' : 'idle'
 
   const [inputText, setInputText] = useState('')
@@ -306,6 +319,7 @@ function App() {
       >
         {status === 'Speaking…' || audioPlaying ? STOP_SVG :
          status === 'Listening…' ? WAVE_SVG :
+         status === 'Paused' ? MIC_OFF_SVG :
          (status === 'Thinking…' || status === 'Searching…') ? SPINNER_SVG : MIC_SVG}
       </button>
 

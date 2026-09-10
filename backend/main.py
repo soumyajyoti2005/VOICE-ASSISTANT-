@@ -163,6 +163,9 @@ async def handle_client_message(client_id: str, data: dict):
             "type": "interrupted",
             "new_response_id": new_response_id,
         })
+        
+    elif msg_type == "toggle_listening":
+        voice_agent.toggle_listening()
 
     elif msg_type in ("prompt", "message"):
         text = data.get("text", "").strip()

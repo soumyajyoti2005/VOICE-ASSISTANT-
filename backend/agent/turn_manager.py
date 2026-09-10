@@ -21,6 +21,7 @@ class TurnStatus(Enum):
     PROCESSING = "processing"
     SPEAKING = "speaking"
     TOOL_RUNNING = "tool_running"
+    PAUSED = "paused"
 
 
 @dataclass
@@ -57,12 +58,16 @@ class TurnManager:
         self._current_turn_metrics: Optional[TurnMetrics] = None
         self._running = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._is_paused = False
 
         self._speech_buffer = bytearray()
         self._speech_detected = False
         self._silence_frames = 0
 
     def _set_status(self, status: TurnStatus):
+        if status == TurnStatus.LISTENING and self._is_paused:
+            status = TurnStatus.PAUSED
+            
         if self.on_status_change:
             self.on_status_change(status)
 
@@ -110,8 +115,17 @@ class TurnManager:
         await rime_tts_manager.close()
         await llm_manager.close()
 
+    def toggle_listening(self):
+        self._is_paused = not self._is_paused
+        if self._is_paused:
+            self._speech_detected = False
+            self._speech_buffer = bytearray()
+            self._set_status(TurnStatus.PAUSED)
+        else:
+            self._set_status(TurnStatus.LISTENING)
+
     def _handle_audio_input(self, chunk: AudioChunk):
-        if not self._stt_connected or not self._running:
+        if not self._stt_connected or not self._running or self._is_paused:
             return
 
         if len(chunk.data) < 2:

@@ -85,6 +85,9 @@ class VoiceAgent:
     def interrupt(self) -> int:
         return self._turn_manager.interrupt()
 
+    def toggle_listening(self):
+        self._turn_manager.toggle_listening()
+
     def process_text_input(self, text: str):
         self._turn_manager.process_text_input(text)
 
