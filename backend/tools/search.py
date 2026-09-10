@@ -68,7 +68,11 @@ async def web_search(
                         if clean_s:
                             snippets.append(clean_s)
                     if urls:
-                        target_url = urllib.parse.unquote(urls[0])
+                        for u in urls:
+                            decoded_u = urllib.parse.unquote(u)
+                            if "ad_domain" not in decoded_u and "duckduckgo.com/y.js" not in decoded_u:
+                                target_url = decoded_u
+                                break
 
             # Step 2: Fetch and scrape text from the target webpage if available
             page_text = ""
