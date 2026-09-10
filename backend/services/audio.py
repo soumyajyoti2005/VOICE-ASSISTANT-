@@ -87,6 +87,7 @@ class AudioPlayback:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._is_playing_chunk = False
 
     def start(self):
         if self._running:
@@ -114,10 +115,13 @@ class AudioPlayback:
                 if chunk is None:
                     break
                 if self._stream and self._running:
+                    self._is_playing_chunk = True
                     self._stream.write(chunk)
+                    self._is_playing_chunk = False
             except queue.Empty:
                 continue
             except Exception:
+                self._is_playing_chunk = False
                 break
 
     def write(self, data: bytes):
@@ -145,6 +149,10 @@ class AudioPlayback:
             self._pyaudio.terminate()
             self._pyaudio = None
 
+    def is_playing(self) -> bool:
+        return self._is_playing_chunk
+
+
 
 class FullDuplexAudio:
     def __init__(
@@ -171,4 +179,4 @@ class FullDuplexAudio:
         self.playback.clear_buffer()
 
     def is_playing(self) -> bool:
-        return not self.playback._buffer.empty() or self.playback._running
+        return not self.playback._buffer.empty() or self.playback.is_playing()

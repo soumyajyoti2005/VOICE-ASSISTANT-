@@ -61,6 +61,8 @@ class RimeTTSClient:
             "text": text,
             "speaker": self._voice,
             "modelId": self._model,
+            "samplingRate": self._sample_rate,
+            "audioFormat": "pcm",
         }
 
         headers = {
@@ -75,11 +77,30 @@ class RimeTTSClient:
                 error_text = await resp.text()
                 raise RuntimeError(f"Rime TTS error: {resp.status} - {error_text}")
 
-            async for audio_bytes in resp.content.iter_chunked(2048):
-                if not audio_bytes:
+            byte_buffer = bytearray()
+            async for raw_bytes in resp.content.iter_chunked(2048):
+                if not raw_bytes:
                     continue
+                byte_buffer.extend(raw_bytes)
+                
+                # Only yield even number of bytes (complete 16-bit frames)
+                if len(byte_buffer) >= 2:
+                    frames_len = len(byte_buffer) - (len(byte_buffer) % 2)
+                    chunk_data = bytes(byte_buffer[:frames_len])
+                    del byte_buffer[:frames_len]
+                    
+                    chunk = RimeAudioChunk(
+                        audio_data=chunk_data,
+                        is_final=False,
+                        response_id=response_id,
+                    )
+                    if on_chunk:
+                        on_chunk(chunk)
+                    yield chunk
+
+            if byte_buffer:
                 chunk = RimeAudioChunk(
-                    audio_data=audio_bytes,
+                    audio_data=bytes(byte_buffer),
                     is_final=False,
                     response_id=response_id,
                 )

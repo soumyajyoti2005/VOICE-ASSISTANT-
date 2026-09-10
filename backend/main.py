@@ -109,11 +109,13 @@ async def agent_metrics_callback(metrics: dict):
 
 
 def agent_audio_callback(chunk: bytes):
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(manager.broadcast_bytes(chunk))
-    except RuntimeError:
-        pass
+    pass
+    # Double-playback via WebSocket and PyAudio causes echo. We rely on PyAudio.
+    # try:
+    #     loop = asyncio.get_running_loop()
+    #     loop.create_task(manager.broadcast_bytes(chunk))
+    # except RuntimeError:
+    #     pass
 
 
 voice_agent.on_state_change = agent_state_callback

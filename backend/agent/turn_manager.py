@@ -92,6 +92,9 @@ class TurnManager:
         self._set_status(TurnStatus.LISTENING)
 
     def process_text_input(self, text: str):
+        # Ensure any leftover playback from previous turns is cleared
+        self.audio.stop_playback_immediately()
+
         state_manager.new_turn()
         response_id = state_manager.get_current_response_id()
         state_manager.state.current_turn_t0 = time.perf_counter()
@@ -121,12 +124,13 @@ class TurnManager:
 
         energy = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2))) / 32768.0
         # If audio is playing through speaker, require higher energy to avoid self-interrupting
-        current_threshold = 0.22 if state_manager.state.audio_playing else config.vad_threshold
+        is_audio_playing = self.audio.is_playing()
+        current_threshold = 0.22 if is_audio_playing else config.vad_threshold
         is_voice = energy > current_threshold
 
         if is_voice:
             # Immediate barge-in on new speech if audio is playing or tool is executing
-            if state_manager.state.audio_playing or state_manager.state.tool_running:
+            if is_audio_playing or state_manager.state.tool_running:
                 self.interrupt()
 
             if not self._speech_detected:
@@ -167,6 +171,9 @@ class TurnManager:
         mean_energy = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2))) / 32768.0
         if mean_energy < 0.03:
             return
+
+        # Ensure any leftover playback from previous turns is cleared
+        self.audio.stop_playback_immediately()
 
         state_manager.new_turn()
         response_id = state_manager.get_current_response_id()
